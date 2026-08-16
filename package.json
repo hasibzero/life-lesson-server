@@ -1,0 +1,27 @@
+{
+  "name": "life-lessons-server",
+  "version": "1.0.0",
+  "description": "��#\u0000 \u0000l\u0000i\u0000f\u0000e\u0000-\u0000l\u0000e\u0000s\u0000s\u0000o\u0000n\u0000-\u0000s\u0000e\u0000r\u0000v\u0000e\u0000r\u0000\r\u0000 \u0000",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hasibzero/life-lesson-server.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/hasibzero/life-lesson-server/issues"
+  },
+  "homepage": "https://github.com/hasibzero/life-lesson-server#readme",
+  "dependencies": {
+    "cors": "^2.8.6",
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1",
+    "mongodb": "^7.5.0"
+  }
+}
