@@ -1052,6 +1052,54 @@ app.get('/api/admin/reports', async (req, res) => {
       }
     });
 
+
+    app.patch('/api/users/upgrade-plan', async (req, res) => {
+  try {
+    const { email, userId } = req.body;
+
+    if (!email && !userId) {
+      return res.status(400).json({
+        success: false,
+        message: 'User email or userId is required to update plan.',
+      });
+    }
+
+    // 1. Query by email or ObjectId
+    const filter = email
+      ? { email: email }
+      : { _id: new ObjectId(userId) };
+
+    // 2. Update 'plan' to 'premium' and refresh 'updatedAt'
+    const updateDoc = {
+      $set: {
+        plan: 'premium',
+        updatedAt: new Date(),
+      },
+    };
+
+    const result = await usersCollection.updateOne(filter, updateDoc);
+
+    if (result.matchedCount === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found.',
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: 'User plan upgraded to premium successfully!',
+      result,
+    });
+  } catch (error) {
+    console.error('Error updating user plan:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Internal server error.',
+    });
+  }
+});
+
     // --- 3. DELETE LESSON AND AUTO-RESOLVE REPORTS (ADMIN) ---
     app.delete('/api/lessons/:id', async (req, res) => {
       try {
