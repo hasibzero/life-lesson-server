@@ -729,152 +729,396 @@ async function run() {
     });
 
     // --- REPORT LESSON ---
-    app.post('/api/lessons/:id/report', async (req, res) => {
-      try {
-        const { id } = req.params;
-        const { userId, reason } = req.body;
+    // --- POST SUBMIT LESSON REPORT ---
+    app.post('/api/lessons/:id/report', express.json(), async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { reporterUserId, reportedUserEmail, reason, details } = req.body;
 
-        if (!ObjectId.isValid(id) || !userId || !reason) {
-          return res.status(400).send({ success: false, message: "Missing required fields" });
-        }
+    const reportsCollection = db.collection("reports");
+    const lessonsCollection = db.collection("lessons");
 
-        let finalUserId = userId;
-        if (ObjectId.isValid(userId) && String(new ObjectId(userId)) === userId) {
-          finalUserId = new ObjectId(userId);
-        }
+    const collections = await db.listCollections().toArray();
+    const colNames = collections.map(c => c.name);
+    const userCollectionName = colNames.includes("user") ? "user" : (colNames.includes("users") ? "users" : "user");
+    const usersCollection = db.collection(userCollectionName);
 
-        const reportDoc = {
-          lessonId: new ObjectId(id),
-          userId: finalUserId,
-          reason: reason,
-          status: "Pending",
-          createdAt: new Date()
-        };
+    // Look up target lesson by string or ObjectId
+    let queryConditions = [{ _id: id }];
+    if (ObjectId.isValid(id)) {
+      try { queryConditions.push({ _id: new ObjectId(id) }); } catch (e) {}
+    }
+    const targetLesson = await lessonsCollection.findOne({ $or: queryConditions });
 
-        await db.collection("reports").insertOne(reportDoc);
+    // Look up author name if not directly on the lesson
+    let creatorName = targetLesson?.creatorName || targetLesson?.authorName;
+    const creatorId = targetLesson?.creatorId || targetLesson?.userId || targetLesson?.authorId;
 
-        res.status(201).send({
-          success: true,
-          message: "Report submitted successfully"
-        });
-
-      } catch (error) {
-        console.error("Error reporting lesson:", error);
-        res.status(500).send({ success: false, message: "Server error while reporting" });
+    if (!creatorName && creatorId) {
+      let userQuery = [{ _id: creatorId.toString() }];
+      if (ObjectId.isValid(creatorId)) {
+        try { userQuery.push({ _id: new ObjectId(creatorId) }); } catch (e) {}
       }
-    });
+      const authorUser = await usersCollection.findOne({ $or: userQuery });
+      creatorName = authorUser?.name || authorUser?.email;
+    }
+
+    const newReport = {
+      lessonId: id,
+      lessonTitle: targetLesson?.title || "Untitled Lesson",
+      creatorId: creatorId ? creatorId.toString() : null,
+      creatorName: creatorName || "Community Creator",
+      authorName: creatorName || "Community Creator",
+      reporterUserId: reporterUserId,
+      reporterEmail: reportedUserEmail || "Anonymous",
+      reason: reason,
+      details: details || "",
+      status: "pending",
+      createdAt: new Date(),
+      updatedAt: new Date()
+    };
+
+    const result = await reportsCollection.insertOne(newReport);
+    res.status(201).json({ success: true, message: "Report submitted successfully.", reportId: result.insertedId });
+  } catch (error) {
+    console.error("Error submitting report:", error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
 
     // --- GET ALL REPORTS (Robust User & Lesson Matching) ---
-    app.get('/api/admin/reports', async (req, res) => {
-      try {
-        const reportsCollection = db.collection("reports");
-        const usersCollection = db.collection("user");
+ // --- 1. GET ALL REPORTS (ADMIN) ---
+    // --- GET ALL ADMIN REPORTS (Auto-Populates Author & Lesson Details) ---
+app.get('/api/admin/reports', async (req, res) => {
+  try {
+    const reportsCollection = db.collection("reports");
+    const lessonsCollection = db.collection("lessons");
 
-        const reports = await reportsCollection.find({}).sort({ createdAt: -1 }).toArray();
+    // Auto-detect collection naming ('user' vs 'users')
+    const collections = await db.listCollections().toArray();
+    const colNames = collections.map(c => c.name);
+    const userCollectionName = colNames.includes("user") 
+      ? "user" 
+      : (colNames.includes("users") ? "users" : "user");
+    const usersCollection = db.collection(userCollectionName);
 
-        const enrichedReports = await Promise.all(reports.map(async (rep) => {
-          let lessonTitle = "Untitled Lesson";
-          let authorName = "Anonymous";
-          let userName = "Anonymous User";
+    const reports = await reportsCollection
+      .find({})
+      .sort({ createdAt: -1 })
+      .toArray();
 
-          // 1. Fetch Lesson & Author Details
-          if (rep.lessonId) {
-            try {
-              const lessonIdObj = ObjectId.isValid(rep.lessonId) ? new ObjectId(rep.lessonId) : rep.lessonId;
-              const lesson = await lessonsCollection.findOne({ _id: lessonIdObj });
-              
-              if (lesson) {
-                lessonTitle = lesson.title;
-                if (lesson.creatorId) {
-                  const author = await usersCollection.findOne({
-                    $or: [
-                      { _id: lesson.creatorId },
-                      { _id: ObjectId.isValid(lesson.creatorId) ? new ObjectId(lesson.creatorId) : null },
-                      { _id: String(lesson.creatorId) }
-                    ]
-                  });
-                  if (author) authorName = author.name || author.email || "Anonymous";
-                }
-              }
-            } catch (err) {
-              console.error("Error fetching lesson for report:", err);
-            }
-          }
+    if (!reports || reports.length === 0) {
+      return res.status(200).json([]);
+    }
 
-          // 2. Fetch Reporter Details (Handles both String and ObjectId user IDs)
-          if (rep.userId) {
-            try {
-              const reporter = await usersCollection.findOne({
-                $or: [
-                  { _id: rep.userId },
-                  { _id: ObjectId.isValid(rep.userId) ? new ObjectId(rep.userId) : null },
-                  { _id: String(rep.userId) }
-                ]
-              });
-              
-              if (reporter) {
-                userName = reporter.name || reporter.email || "Anonymous User";
-              }
-            } catch (err) {
-              console.error("Error fetching reporter for report:", err);
-            }
-          }
-
-          return {
-            ...rep,
-            lessonTitle,
-            authorName,
-            userName
-          };
-        }));
-
-        res.status(200).send(enrichedReports);
-
-      } catch (error) {
-        console.error("Error fetching reports:", error);
-        res.status(500).send({ success: false, message: "Failed to fetch reports" });
+    // 1. Fetch matching lessons
+    const rawLessonIds = reports.map(r => r.lessonId).filter(Boolean);
+    const lessonQueryIds = [];
+    rawLessonIds.forEach(id => {
+      lessonQueryIds.push(id.toString());
+      if (ObjectId.isValid(id)) {
+        try { lessonQueryIds.push(new ObjectId(id)); } catch (e) {}
       }
     });
 
-    // --- RESOLVE / UPDATE REPORT STATUS ---
-   // --- CLEAR / RESOLVE ALL REPORTS FOR A LESSON (IGNORE ACTION) ---
+    const lessons = await lessonsCollection.find({
+      _id: { $in: lessonQueryIds }
+    }).toArray();
+
+    const lessonMap = {};
+    const rawUserIds = [];
+
+    lessons.forEach(l => {
+      lessonMap[l._id.toString()] = l;
+      const uId = l.creatorId || l.userId || l.authorId;
+      if (uId) rawUserIds.push(uId);
+    });
+
+    reports.forEach(r => {
+      if (r.creatorId) rawUserIds.push(r.creatorId);
+      if (r.reporterUserId) rawUserIds.push(r.reporterUserId);
+    });
+
+    // 2. Fetch author profiles from user collection
+    const userQueryIds = [];
+    rawUserIds.forEach(id => {
+      userQueryIds.push(id.toString());
+      if (ObjectId.isValid(id)) {
+        try { userQueryIds.push(new ObjectId(id)); } catch (e) {}
+      }
+    });
+
+    const userMap = {};
+    if (userQueryIds.length > 0) {
+      const users = await usersCollection.find({
+        _id: { $in: userQueryIds }
+      }).toArray();
+
+      users.forEach(u => {
+        userMap[u._id.toString()] = u;
+      });
+    }
+
+    // 3. Enrich every report payload
+    const enrichedReports = reports.map(report => {
+      const matchedLesson = lessonMap[report.lessonId?.toString()];
+      const creatorId = (
+        matchedLesson?.creatorId || 
+        matchedLesson?.userId || 
+        matchedLesson?.authorId || 
+        report.creatorId
+      )?.toString();
+
+      const authorUser = creatorId ? userMap[creatorId] : null;
+      const reporterUser = report.reporterUserId ? userMap[report.reporterUserId?.toString()] : null;
+
+      const authorName = 
+        matchedLesson?.creatorName ||
+        matchedLesson?.authorName ||
+        authorUser?.name ||
+        authorUser?.displayName ||
+        report.authorName ||
+        report.creatorName ||
+        "Community Creator";
+
+      const lessonTitle = 
+        matchedLesson?.title || 
+        report.lessonTitle || 
+        "Untitled Lesson";
+
+      const reporterName = 
+        reporterUser?.name ||
+        report.reporterName ||
+        report.userName ||
+        report.reporterEmail ||
+        "Anonymous User";
+
+      return {
+        ...report,
+        lessonTitle,
+        authorName,
+        creatorName: authorName,
+        reporterName,
+        reporterEmail: report.reporterEmail || reporterUser?.email || "Anonymous",
+      };
+    });
+
+    res.status(200).json(enrichedReports);
+  } catch (error) {
+    console.error("Error fetching admin reports:", error);
+    res.status(500).json({ 
+      success: false, 
+      message: "Failed to load reports", 
+      error: error.message 
+    });
+  }
+});
+
+    // --- 2. BATCH RESOLVE REPORTS BY LESSON ID (ADMIN) ---
     app.patch('/api/admin/reports/lesson/:lessonId/resolve', async (req, res) => {
       try {
         const { lessonId } = req.params;
+        const reportsCollection = db.collection("reports");
 
-        if (!ObjectId.isValid(lessonId)) {
-          return res.status(400).send({ success: false, message: "Invalid lesson ID format" });
-        }
+        const filter = {
+          $or: [
+            { lessonId: lessonId },
+            ...(ObjectId.isValid(lessonId) ? [{ lessonId: new ObjectId(lessonId) }] : [])
+          ]
+        };
 
-        const result = await db.collection("reports").updateMany(
-          { 
-            $or: [
-              { lessonId: new ObjectId(lessonId) },
-              { lessonId: lessonId }
-            ]
-          },
-          { 
-            $set: { 
-              status: "Resolved", 
-              updatedAt: new Date() 
-            } 
+        const result = await reportsCollection.updateMany(filter, {
+          $set: {
+            status: "resolved",
+            resolvedAt: new Date(),
+            updatedAt: new Date()
           }
-        );
+        });
 
-        res.status(200).send({ 
+        res.status(200).json({ 
           success: true, 
-          message: "All reports for this lesson have been cleared", 
+          message: "All reports for this lesson marked as resolved.",
           modifiedCount: result.modifiedCount 
         });
       } catch (error) {
         console.error("Error resolving lesson reports:", error);
-        res.status(500).send({ 
+        res.status(500).json({ 
           success: false, 
           message: "Failed to resolve reports", 
           error: error.message 
         });
       }
     });
+
+    // --- 3. DELETE LESSON AND AUTO-RESOLVE REPORTS (ADMIN) ---
+    app.delete('/api/lessons/:id', async (req, res) => {
+      try {
+        const { id } = req.params;
+        const lessonsCollection = db.collection("lessons");
+        const reportsCollection = db.collection("reports");
+
+        const lessonQuery = {
+          $or: [
+            { _id: id },
+            ...(ObjectId.isValid(id) ? [{ _id: new ObjectId(id) }] : [])
+          ]
+        };
+
+        const deleteResult = await lessonsCollection.deleteOne(lessonQuery);
+
+        // Auto-resolve any remaining report tickets for this deleted lesson
+        await reportsCollection.updateMany(
+          {
+            $or: [
+              { lessonId: id },
+              ...(ObjectId.isValid(id) ? [{ lessonId: new ObjectId(id) }] : [])
+            ]
+          },
+          {
+            $set: {
+              status: "resolved",
+              actionTaken: "lesson_deleted",
+              resolvedAt: new Date(),
+              updatedAt: new Date()
+            }
+          }
+        );
+
+        res.status(200).json({ 
+          success: true, 
+          message: "Lesson permanently deleted and reports resolved.",
+          deletedCount: deleteResult.deletedCount
+        });
+      } catch (error) {
+        console.error("Error deleting lesson:", error);
+        res.status(500).json({ 
+          success: false, 
+          message: "Failed to delete lesson", 
+          error: error.message 
+        });
+      }
+    });
+
+    // --- RESOLVE / UPDATE REPORT STATUS ---
+   // --- CLEAR / RESOLVE ALL REPORTS FOR A LESSON (IGNORE ACTION) ---
+// --- GET ALL ADMIN REPORTS (Auto-Enriched with Author & Lesson Details) ---
+// --- GET ALL ADMIN REPORTS (Robust Author & Lesson Resolver) ---
+app.get('/api/admin/reports', async (req, res) => {
+  try {
+    const reportsCollection = db.collection("reports");
+    const lessonsCollection = db.collection("lessons");
+
+    // 1. Detect if the collection is named 'user' or 'users'
+    const collections = await db.listCollections().toArray();
+    const colNames = collections.map(c => c.name);
+    const userCollectionName = colNames.includes("user") 
+      ? "user" 
+      : (colNames.includes("users") ? "users" : "user");
+    const usersCollection = db.collection(userCollectionName);
+
+    const reports = await reportsCollection
+      .find({})
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    if (!reports || reports.length === 0) {
+      return res.status(200).json([]);
+    }
+
+    // 2. Build Query IDs for Lessons (supporting both String and ObjectId)
+    const rawLessonIds = reports.map(r => r.lessonId).filter(Boolean);
+    const lessonQueryIds = [];
+
+    rawLessonIds.forEach(id => {
+      lessonQueryIds.push(id.toString());
+      if (ObjectId.isValid(id)) {
+        try { lessonQueryIds.push(new ObjectId(id)); } catch (e) {}
+      }
+    });
+
+    const lessons = await lessonsCollection.find({
+      _id: { $in: lessonQueryIds }
+    }).toArray();
+
+    // Map lessons by stringified ID
+    const lessonMap = {};
+    const rawUserIds = [];
+
+    lessons.forEach(l => {
+      lessonMap[l._id.toString()] = l;
+      const uid = l.creatorId || l.userId || l.authorId;
+      if (uid) rawUserIds.push(uid);
+    });
+
+    reports.forEach(r => {
+      const uid = r.creatorId || r.authorId;
+      if (uid) rawUserIds.push(uid);
+    });
+
+    // 3. Build Query IDs for Users (supporting both String and ObjectId)
+    const userQueryIds = [];
+    rawUserIds.forEach(id => {
+      userQueryIds.push(id.toString());
+      if (ObjectId.isValid(id)) {
+        try { userQueryIds.push(new ObjectId(id)); } catch (e) {}
+      }
+    });
+
+    const userMap = {};
+    if (userQueryIds.length > 0) {
+      const users = await usersCollection.find({
+        _id: { $in: userQueryIds }
+      }).toArray();
+
+      users.forEach(u => {
+        userMap[u._id.toString()] = u.name || u.displayName || u.email || "Community Author";
+      });
+    }
+
+    // 4. Enrich every report with guaranteed author details
+    const enrichedReports = reports.map(report => {
+      const lId = report.lessonId?.toString();
+      const lesson = lessonMap[lId];
+
+      const creatorId = (
+        lesson?.creatorId || 
+        lesson?.userId || 
+        lesson?.authorId || 
+        report.creatorId
+      )?.toString();
+
+      const resolvedAuthorName =
+        lesson?.creatorName ||
+        lesson?.authorName ||
+        (creatorId ? userMap[creatorId] : null) ||
+        report.creatorName ||
+        report.authorName ||
+        "Community Creator";
+
+      const resolvedLessonTitle =
+        lesson?.title ||
+        report.lessonTitle ||
+        "Untitled Lesson";
+
+      return {
+        ...report,
+        lessonTitle: resolvedLessonTitle,
+        creatorName: resolvedAuthorName,
+        authorName: resolvedAuthorName,
+        authorEmail: creatorId && userMap[creatorId] ? userMap[creatorId] : null
+      };
+    });
+
+    res.status(200).json(enrichedReports);
+  } catch (error) {
+    console.error("Error fetching admin reports:", error);
+    res.status(500).json({ 
+      success: false, 
+      message: "Failed to load reports", 
+      error: error.message 
+    });
+  }
+});
 
     // --- GET COMMENTS FOR A LESSON ---
     app.get('/api/comments/:lessonId', async (req, res) => {
@@ -1057,70 +1301,113 @@ async function run() {
     });
     // --- GET ADMIN PLATFORM STATS ---
     // --- GET COMPREHENSIVE ADMIN PLATFORM ANALYTICS ---
+    // --- GET ADMIN DASHBOARD STATS ---
+// --- GET COMPREHENSIVE ADMIN OVERVIEW STATS ---
     app.get('/api/admin/stats', async (req, res) => {
       try {
         const usersCollection = db.collection("user");
+        const lessonsCollection = db.collection("lessons");
         const reportsCollection = db.collection("reports");
 
-        // 1. Basic Counts
-        const totalUsers = await usersCollection.countDocuments();
-        const totalPublicLessons = await lessonsCollection.countDocuments({ visibility: "Public" });
-        const reportedLessons = await reportsCollection.countDocuments({ status: { $ne: "Resolved" } });
-        const activeSubscriptions = await usersCollection.countDocuments({ plan: "premium" });
-
-        // 2. Today's New Lessons
-        const startOfToday = new Date();
-        startOfToday.setHours(0, 0, 0, 0);
-        const todayLessons = await lessonsCollection.countDocuments({
-          createdAt: { $gte: startOfToday }
-        });
-
-        // 3. 7-Day Growth Trends (Lessons & Users)
-        const dayNames = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+        const now = new Date();
+        const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
         const sevenDaysAgo = new Date();
         sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 6);
         sevenDaysAgo.setHours(0, 0, 0, 0);
 
-        const recentLessons = await lessonsCollection
-          .find({ createdAt: { $gte: sevenDaysAgo } })
-          .toArray();
+        // 1. Fetch Primary Counts in Parallel
+        const [
+          totalUsers,
+          totalLessons,
+          totalPublicLessons,
+          openReports,
+          todayLessons
+        ] = await Promise.all([
+          usersCollection.countDocuments(),
+          lessonsCollection.countDocuments(),
+          lessonsCollection.countDocuments({
+            $or: [
+              { visibility: "Public" },
+              { visibility: { $regex: /^public$/i } },
+              { visibility: { $exists: false } } // Fallback for legacy documents
+            ]
+          }),
+          reportsCollection.find({
+            status: { $not: { $regex: /^resolved$/i } }
+          }).toArray(),
+          lessonsCollection.countDocuments({
+            createdAt: { $gte: startOfToday }
+          })
+        ]);
 
-        const recentUsers = await usersCollection
-          .find({ createdAt: { $gte: sevenDaysAgo } })
-          .toArray();
+        // Calculate unique flagged lessons needing moderation
+        const uniqueReportedLessons = new Set(
+          openReports.map(r => r.lessonId?.toString()).filter(Boolean)
+        );
+        const reportedLessonsCount = uniqueReportedLessons.size || openReports.length;
 
-        const lessonGrowth = [];
-        const userGrowth = [];
-
+        // 2. Generate 7-Day Day Label Timeline
+        const daysOfWeek = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+        const last7Days = [];
         for (let i = 6; i >= 0; i--) {
-          const targetDate = new Date();
-          targetDate.setDate(targetDate.getDate() - i);
-          const dayStr = dayNames[targetDate.getDay()];
-          const dateOnly = targetDate.toISOString().split("T")[0];
-
-          const lessonCount = recentLessons.filter((l) => {
-            const lDate = new Date(l.createdAt).toISOString().split("T")[0];
-            return lDate === dateOnly;
-          }).length;
-
-          const userCount = recentUsers.filter((u) => {
-            const uDate = u.createdAt ? new Date(u.createdAt).toISOString().split("T")[0] : null;
-            return uDate === dateOnly;
-          }).length;
-
-          lessonGrowth.push({ day: dayStr, count: lessonCount });
-          userGrowth.push({ day: dayStr, count: userCount });
+          const d = new Date();
+          d.setDate(d.getDate() - i);
+          last7Days.push({
+            dateStr: d.toISOString().split("T")[0],
+            dayName: daysOfWeek[d.getDay()],
+            count: 0
+          });
         }
 
-        // 4. Most Active Contributors
-        const contributorAgg = await lessonsCollection.aggregate([
+        // 3. Lesson Growth Trend (Past 7 Days)
+        const recentLessons = await lessonsCollection.find({
+          createdAt: { $gte: sevenDaysAgo }
+        }).toArray();
+
+        const lessonGrowthMap = {};
+        last7Days.forEach(d => { lessonGrowthMap[d.dateStr] = 0; });
+        recentLessons.forEach(lesson => {
+          if (lesson.createdAt) {
+            const dateStr = new Date(lesson.createdAt).toISOString().split("T")[0];
+            if (lessonGrowthMap[dateStr] !== undefined) {
+              lessonGrowthMap[dateStr]++;
+            }
+          }
+        });
+        const lessonGrowth = last7Days.map(d => ({
+          day: d.dayName,
+          count: lessonGrowthMap[d.dateStr] || 0
+        }));
+
+        // 4. User Registration Trend (Past 7 Days)
+        const recentUsers = await usersCollection.find({
+          createdAt: { $gte: sevenDaysAgo }
+        }).toArray();
+
+        const userGrowthMap = {};
+        last7Days.forEach(d => { userGrowthMap[d.dateStr] = 0; });
+        recentUsers.forEach(u => {
+          if (u.createdAt) {
+            const dateStr = new Date(u.createdAt).toISOString().split("T")[0];
+            if (userGrowthMap[dateStr] !== undefined) {
+              userGrowthMap[dateStr]++;
+            }
+          }
+        });
+        const userGrowth = last7Days.map(d => ({
+          day: d.dayName,
+          count: userGrowthMap[d.dateStr] || 0
+        }));
+
+        // 5. Top Active Contributors
+        const topAgg = await lessonsCollection.aggregate([
           { $match: { creatorId: { $ne: null } } },
           { $group: { _id: "$creatorId", count: { $sum: 1 } } },
           { $sort: { count: -1 } },
           { $limit: 5 }
         ]).toArray();
 
-        const creatorIds = contributorAgg.map(c => c._id);
+        const creatorIds = topAgg.map(t => t._id);
         const objectIdCreatorIds = creatorIds.filter(id => ObjectId.isValid(id)).map(id => new ObjectId(id));
 
         const matchedUsers = await usersCollection.find({
@@ -1130,46 +1417,40 @@ async function run() {
           ]
         }).toArray();
 
-        const userMap = {};
+        const userLookup = {};
         matchedUsers.forEach(u => {
-          userMap[u._id.toString()] = {
-            name: u.name || "Anonymous",
-            email: u.email || "",
-            image: u.image || "",
-            role: u.role || "user"
-          };
+          userLookup[u._id.toString()] = u;
         });
 
-        const activeContributors = contributorAgg.map(item => {
-          const userDetails = userMap[item._id?.toString()] || { name: "Anonymous", email: "", image: "", role: "user" };
+        const activeContributors = topAgg.map(item => {
+          const u = userLookup[item._id?.toString()];
           return {
             userId: item._id,
-            name: userDetails.name,
-            email: userDetails.email,
-            image: userDetails.image,
-            role: userDetails.role,
+            name: u?.name || "Community Creator",
+            email: u?.email || "",
+            image: u?.image || "",
+            role: u?.role || "user",
             lessonsCount: item.count
           };
         });
 
-        res.status(200).send({
+        res.status(200).json({
           success: true,
           totalUsers,
-          totalPublicLessons,
-          reportedLessons,
-          activeSubscriptions,
+          totalLessons,
+          totalPublicLessons: totalPublicLessons || totalLessons,
+          reportedLessons: reportedLessonsCount,
           todayLessons,
           lessonGrowth,
           userGrowth,
           activeContributors
         });
-
       } catch (error) {
         console.error("Error fetching admin stats:", error);
-        res.status(500).send({ 
-          success: false, 
-          message: "Failed to fetch admin statistics", 
-          error: error.message 
+        res.status(500).json({
+          success: false,
+          message: "Failed to fetch admin statistics",
+          error: error.message
         });
       }
     });
