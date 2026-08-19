@@ -251,55 +251,157 @@ async function run() {
     });
 
     // --- GET ALL PUBLIC LESSONS ---
-    app.get('/api/lessons', async (req, res) => {
-      try {
-        const lessons = await lessonsCollection
-          .find({ visibility: "Public" })
-          .sort({ createdAt: -1 })
-          .toArray();
+// --- GET /api/lessons (Query, Filter, Search & Pagination Supported) ---
+app.get('/api/lessons', async (req, res) => {
+  try {
+    const {
+      search = "",
+      category = "All",
+      emotionalTone = "All",
+      accessLevel = "All",
+      visibility = "Public",
+      sortBy = "newest", // newest | oldest | popular
+      page = 1,
+      limit = 0 // Set limit > 0 for pagination (e.g. limit=8)
+    } = req.query;
 
-        const creatorIds = [...new Set(lessons.map(lesson => lesson.creatorId).filter(Boolean))];
-        const usersCollection = db.collection("user"); 
-        
-        const objectIdCreatorIds = creatorIds
-          .filter(id => ObjectId.isValid(id))
-          .map(id => new ObjectId(id));
+    const lessonsCollection = db.collection("lessons");
+    const usersCollection = db.collection("user");
 
-        const users = await usersCollection.find({
-          $or: [
-            { _id: { $in: creatorIds } },
-            { _id: { $in: objectIdCreatorIds } }
-          ]
-        }).toArray();
+    // 1. Base Query Builder
+    const query = {};
 
-        const userMap = {};
-        users.forEach(user => {
-          userMap[user._id.toString()] = {
-            name: user.name || "Anonymous",
-            image: user.image || ""
-          };
-        });
+    // Filter by Visibility
+    if (visibility !== "all") {
+      query.visibility = { $regex: new RegExp(`^${visibility}$`, "i") };
+    }
 
-        const enrichedLessons = lessons.map(lesson => {
-          const creator = userMap[lesson.creatorId] || { name: "Anonymous", image: "" };
-          return {
-            ...lesson,
-            creatorName: creator.name,
-            creatorAvatar: creator.image
-          };
-        });
+    // Filter by Category
+    if (category && category !== "All") {
+      query.category = category;
+    }
 
-        res.status(200).send(enrichedLessons);
+    // Filter by Emotional Tone
+    if (emotionalTone && emotionalTone !== "All") {
+      query.emotionalTone = emotionalTone;
+    }
 
-      } catch (error) {
-        console.error("Error fetching lessons with creators:", error);
-        res.status(500).send({ 
-          success: false, 
-          message: "Failed to fetch lessons",
-          error: error.message 
-        });
-      }
+    // Filter by Access Level (Free / Premium)
+    if (accessLevel && accessLevel !== "All") {
+      query.accessLevel = accessLevel;
+    }
+
+    // 2. Search Filter (Title, Description, or Author Name)
+    if (search.trim()) {
+      const searchRegex = new RegExp(search.trim(), "i");
+
+      // Find any authors matching search query to include their lessons
+      const matchingUsers = await usersCollection
+        .find({ name: searchRegex })
+        .project({ _id: 1 })
+        .toArray();
+
+      const matchingUserIds = matchingUsers.map((u) => u._id.toString());
+      const matchingUserObjectIds = matchingUsers.map((u) => u._id);
+
+      query.$or = [
+        { title: searchRegex },
+        { description: searchRegex },
+        { creatorName: searchRegex },
+        { creatorId: { $in: [...matchingUserIds, ...matchingUserObjectIds] } }
+      ];
+    }
+
+    // 3. Sorting Options
+    let sortOptions = { createdAt: -1 }; // Default: newest
+    if (sortBy === "oldest") {
+      sortOptions = { createdAt: 1 };
+    } else if (sortBy === "popular") {
+      sortOptions = { views: -1, likesCount: -1 };
+    }
+
+    // 4. Pagination Setup
+    const pageNumber = Math.max(1, parseInt(page, 10) || 1);
+    const limitNumber = parseInt(limit, 10) || 0;
+    const skip = limitNumber > 0 ? (pageNumber - 1) * limitNumber : 0;
+
+    // 5. Query MongoDB
+    const totalLessons = await lessonsCollection.countDocuments(query);
+    
+    let lessonsCursor = lessonsCollection
+      .find(query)
+      .sort(sortOptions)
+      .skip(skip);
+
+    if (limitNumber > 0) {
+      lessonsCursor = lessonsCursor.limit(limitNumber);
+    }
+
+    const lessons = await lessonsCursor.toArray();
+
+    // 6. Enrich Lessons with User Information (Creator Name & Avatar)
+    const creatorIds = [
+      ...new Set(lessons.map((lesson) => lesson.creatorId || lesson.userId).filter(Boolean))
+    ];
+
+    const objectIdCreatorIds = creatorIds
+      .filter((id) => ObjectId.isValid(id))
+      .map((id) => new ObjectId(id));
+
+    const users = await usersCollection
+      .find({
+        $or: [
+          { _id: { $in: creatorIds } },
+          { _id: { $in: objectIdCreatorIds } }
+        ]
+      })
+      .toArray();
+
+    const userMap = {};
+    users.forEach((user) => {
+      userMap[user._id.toString()] = {
+        name: user.name || "Anonymous Creator",
+        image: user.image || ""
+      };
     });
+
+    const enrichedLessons = lessons.map((lesson) => {
+      const creatorIdStr = (lesson.creatorId || lesson.userId)?.toString();
+      const creator = userMap[creatorIdStr] || {
+        name: lesson.creatorName || "Anonymous Creator",
+        image: lesson.creatorAvatar || ""
+      };
+
+      return {
+        ...lesson,
+        creatorName: creator.name,
+        creatorAvatar: creator.image
+      };
+    });
+
+    // 7. Response Format
+    // Returns full pagination info if limit > 0, otherwise returns the array directly
+    if (limitNumber > 0) {
+      return res.status(200).json({
+        success: true,
+        total: totalLessons,
+        page: pageNumber,
+        totalPages: Math.ceil(totalLessons / limitNumber),
+        data: enrichedLessons
+      });
+    }
+
+    res.status(200).send(enrichedLessons);
+
+  } catch (error) {
+    console.error("Error fetching lessons:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch query-based lessons",
+      error: error.message
+    });
+  }
+});
 
     // --- GET FEATURED LESSONS ---
     // --- GET FEATURED LESSONS (Only Public, Featured, and Reviewed) ---
