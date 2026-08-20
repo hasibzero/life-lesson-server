@@ -1,11 +1,19 @@
 const express = require("express");
+const { createRemoteJWKSet, jwtVerify } = require("jose-cjs");
+
 const app = express();
 const dotenv = require("dotenv");
 dotenv.config();
 const cors = require("cors");
 const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
 
-app.use(cors());
+app.use(
+  cors({
+    origin: ['http://localhost:3000', process.env.CLIENT_URL || '*'],
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'],
+    credentials: true,
+  })
+);
 app.use(express.json());
 
 const uri = process.env.MONGODB_URI;
@@ -18,6 +26,9 @@ const client = new MongoClient(uri, {
     deprecationErrors: true,
   },
 });
+const clientUrl = process.env.CLIENT_URL;
+const JWKS = createRemoteJWKSet(new URL(`${clientUrl}/api/auth/jwks`));
+
 
 async function run() {
   try {
@@ -32,9 +43,39 @@ async function run() {
 
     // 2. Define API Routes
 
+  const verifyToken = async (req, res, next) => {
+  try {
+    const authHeader = req.headers.authorization;
+
+    if (!authHeader || !authHeader.startsWith("Bearer ")) {
+      return res.status(401).json({
+        success: false,
+        message: "Unauthorized: No token provided",
+      });
+    }
+
+    const token = authHeader.split(" ")[1];
+
+    const { payload } = await jwtVerify(token, JWKS, {
+      issuer: clientUrl,
+      audience: clientUrl,
+    });
+
+    // Attach decoded user payload to request
+    req.user = payload;
+    next();
+  } catch (error) {
+    console.error("Token verification failed:", error.message);
+    return res.status(401).json({
+      success: false,
+      message: "Unauthorized: Invalid or expired token",
+      error: error.message,
+    });
+  }
+};
     // --- ADD LESSON ---
     // --- CREATE / ADD LESSON (Auto-reviewed ONLY for Admins) ---
-    app.post('/api/add-lesson', async (req, res) => {
+    app.post('/api/add-lesson',verifyToken, async (req, res) => {
       try {
         const lesson = req.body;
         const usersCollection = db.collection("user");
@@ -89,35 +130,38 @@ async function run() {
     });
 
     // --- GET MY LESSONS ---
-    app.get("/api/my-lessons/:creatorId", async (req, res) => {
-      try {
-        const { creatorId } = req.params;
- 
-        if (!creatorId) {
-          return res
-            .status(400)
-            .send({ success: false, message: "Creator ID is required" });
-        }
+    // --- GET MY LESSONS (All lessons including pending review) ---
+    // In server.js
+app.get("/api/my-lessons/:creatorId",verifyToken, async (req, res) => {
+  try {
+    const { creatorId } = req.params;
 
-        const query = { creatorId: new ObjectId(creatorId) };
-        const lessons = await lessonsCollection
-          .find(query)
-          .sort({ createdAt: -1 })
-          .toArray();
+    const query = {
+      $or: [
+        { creatorId: creatorId },
+        { userId: creatorId },
+        ...(ObjectId.isValid(creatorId)
+          ? [
+              { creatorId: new ObjectId(creatorId) },
+              { userId: new ObjectId(creatorId) },
+            ]
+          : []),
+      ],
+    };
 
-        res.status(200).send(lessons);
-      } catch (error) {
-        console.error("Error fetching user lessons:", error);
-        res.status(500).send({
-          success: false,
-          message: "Failed to fetch lessons",
-          error: error.message,
-        });
-      }
-    });
+    const lessons = await lessonsCollection
+      .find(query)
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    res.status(200).send(lessons);
+  } catch (error) {
+    res.status(500).send({ success: false, message: error.message });
+  }
+});
 
     // --- UPDATE LESSON ---
-    app.patch('/api/update-lesson/:id', async (req, res) => {
+    app.patch('/api/update-lesson/:id',verifyToken, async (req, res) => {
       try {
         const { id } = req.params;
 
@@ -170,7 +214,7 @@ async function run() {
     });
 
     // --- DELETE LESSON BY ID ---
-    app.delete('/api/lessons/:id', async (req, res) => {
+    app.delete('/api/lessons/:id',verifyToken, async (req, res) => {
       try {
         const { id } = req.params;
 
@@ -402,6 +446,7 @@ app.get('/api/lessons', async (req, res) => {
     });
   }
 });
+//no need tokenization for this
 
     // --- GET FEATURED LESSONS ---
     // --- GET FEATURED LESSONS (Only Public, Featured, and Reviewed) ---
@@ -458,6 +503,9 @@ app.get('/api/lessons', async (req, res) => {
         });
       }
     });
+    //no need tokenization for this
+
+    
 // --- GET AUTHOR PROFILE & THEIR PUBLIC LESSONS ---
     app.get('/api/author-profile/:id', async (req, res) => {
       try {
@@ -694,7 +742,7 @@ app.get('/api/lessons', async (req, res) => {
     });
     // --- GET SINGLE LESSON BY ID ---
     // --- GET SINGLE LESSON BY ID (With Normalized Creator Data) ---
-    app.get('/api/lessons/:id', async (req, res) => {
+    app.get('/api/lessons/:id',verifyToken, async (req, res) => {
       try {
         const { id } = req.params;
 
@@ -742,7 +790,7 @@ app.get('/api/lessons', async (req, res) => {
     });
 
     // --- TOGGLE LIKE / LOVE REACT ---
-    app.post('/api/lessons/:id/like', async (req, res) => {
+    app.post('/api/lessons/:id/like',verifyToken, async (req, res) => {
       try {
         const { id } = req.params;
         const { userId } = req.body;
@@ -792,7 +840,7 @@ app.get('/api/lessons', async (req, res) => {
 
     // --- TOGGLE BOOKMARK ---
    // --- TOGGLE BOOKMARK ---
-    app.post('/api/lessons/:id/bookmark', async (req, res) => {
+    app.post('/api/lessons/:id/bookmark',verifyToken, async (req, res) => {
       try {
         const { id } = req.params;
         const { userId } = req.body;
@@ -832,7 +880,7 @@ app.get('/api/lessons', async (req, res) => {
 
     // --- REPORT LESSON ---
     // --- POST SUBMIT LESSON REPORT ---
-    app.post('/api/lessons/:id/report', express.json(), async (req, res) => {
+    app.post('/api/lessons/:id/report',verifyToken, express.json(), async (req, res) => {
   try {
     const { id } = req.params;
     const { reporterUserId, reportedUserEmail, reason, details } = req.body;
@@ -1053,53 +1101,59 @@ app.get('/api/admin/reports', async (req, res) => {
     });
 
 
-    app.patch('/api/users/upgrade-plan', async (req, res) => {
-  try {
-    const { email, userId } = req.body;
+app.patch('/api/users/upgrade-plan', async (req, res) => {
+      try {
+        const usersCollection = db.collection("user");
+        const { email, userId } = req.body || {};
 
-    if (!email && !userId) {
-      return res.status(400).json({
-        success: false,
-        message: 'User email or userId is required to update plan.',
-      });
-    }
+        if (!email && !userId) {
+          return res.status(400).json({
+            success: false,
+            message: 'User email or userId is required.',
+          });
+        }
 
-    // 1. Query by email or ObjectId
-    const filter = email
-      ? { email: email }
-      : { _id: new ObjectId(userId) };
+        // Build search filter matching by email or _id
+        let filter = {};
+        if (email) {
+          filter = { email: email.toLowerCase().trim() };
+        } else if (userId) {
+          filter = {
+            $or: [
+              { _id: userId },
+              ...(ObjectId.isValid(userId) ? [{ _id: new ObjectId(userId) }] : [])
+            ]
+          };
+        }
 
-    // 2. Update 'plan' to 'premium' and refresh 'updatedAt'
-    const updateDoc = {
-      $set: {
-        plan: 'premium',
-        updatedAt: new Date(),
-      },
-    };
+        const result = await usersCollection.updateOne(filter, {
+          $set: {
+            plan: 'premium',
+            updatedAt: new Date(),
+          },
+        });
 
-    const result = await usersCollection.updateOne(filter, updateDoc);
+        if (result.matchedCount === 0) {
+          console.warn(`[Upgrade] User not found for query:`, filter);
+          return res.status(404).json({
+            success: false,
+            message: 'User not found in database.',
+          });
+        }
 
-    if (result.matchedCount === 0) {
-      return res.status(404).json({
-        success: false,
-        message: 'User not found.',
-      });
-    }
-
-    return res.status(200).json({
-      success: true,
-      message: 'User plan upgraded to premium successfully!',
-      result,
+        console.log(`[Upgrade Success] Upgraded user:`, filter);
+        return res.status(200).json({
+          success: true,
+          message: 'User upgraded to Premium successfully.',
+        });
+      } catch (error) {
+        console.error('[Upgrade Error]:', error);
+        return res.status(500).json({
+          success: false,
+          message: error.message || 'Internal server error.',
+        });
+      }
     });
-  } catch (error) {
-    console.error('Error updating user plan:', error);
-    return res.status(500).json({
-      success: false,
-      message: 'Internal server error.',
-    });
-  }
-});
-
     // --- 3. DELETE LESSON AND AUTO-RESOLVE REPORTS (ADMIN) ---
     app.delete('/api/lessons/:id', async (req, res) => {
       try {
@@ -1271,7 +1325,7 @@ app.get('/api/admin/reports', async (req, res) => {
 });
 
     // --- GET COMMENTS FOR A LESSON ---
-    app.get('/api/comments/:lessonId', async (req, res) => {
+    app.get('/api/comments/:lessonId',verifyToken, async (req, res) => {
       try {
         const { lessonId } = req.params;
 
@@ -1315,7 +1369,7 @@ app.get('/api/admin/reports', async (req, res) => {
     });
 
     // --- POST A NEW COMMENT ---
-    app.post('/api/comments', async (req, res) => {
+    app.post('/api/comments',verifyToken, async (req, res) => {
       try {
         const { lessonId, userId, text } = req.body;
 
