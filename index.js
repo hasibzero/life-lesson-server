@@ -1015,7 +1015,64 @@ app.get("/api/top-contributors", async (req, res) => {
   }
 });
 
+
+
+
+app.get("/api/lessons/admin-all", verifyToken, async (req, res) => {
+  try {
+    const lessons = await lessonsCollection
+      .find({})
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    const creatorIds = [
+      ...new Set(lessons.map((lesson) => lesson.creatorId).filter(Boolean)),
+    ];
+    const objectIdCreatorIds = creatorIds
+      .filter((id) => ObjectId.isValid(id))
+      .map((id) => new ObjectId(id));
+
+    const users = await usersCollection
+      .find({
+        $or: [
+          { _id: { $in: creatorIds } },
+          { _id: { $in: objectIdCreatorIds } },
+        ],
+      })
+      .toArray();
+
+    const userMap = {};
+    users.forEach((user) => {
+      userMap[user._id.toString()] = {
+        name: user.name || "Anonymous",
+        image: user.image || "",
+      };
+    });
+
+    const enrichedLessons = lessons.map((lesson) => {
+      const creator = userMap[lesson.creatorId] || {
+        name: "Anonymous",
+        image: "",
+      };
+      return {
+        ...lesson,
+        creatorName: creator.name,
+        creatorAvatar: creator.image,
+      };
+    });
+
+    return res.status(200).json(enrichedLessons);
+  } catch (error) {
+    console.error("Error fetching admin lessons:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to fetch admin lessons",
+      error: error.message,
+    });
+  }
+});
 // GET SINGLE LESSON (Public access without token barrier)
+
 app.get("/api/lessons/:id", async (req, res) => {
   try {
     const { id } = req.params;
@@ -1076,59 +1133,7 @@ app.get("/api/lessons/:id", async (req, res) => {
 // ==========================================
 
 // ADMIN: GET ALL LESSONS
-app.get("/api/lessons/admin-all", verifyToken, async (req, res) => {
-  try {
-    const lessons = await lessonsCollection
-      .find({})
-      .sort({ createdAt: -1 })
-      .toArray();
 
-    const creatorIds = [
-      ...new Set(lessons.map((lesson) => lesson.creatorId).filter(Boolean)),
-    ];
-    const objectIdCreatorIds = creatorIds
-      .filter((id) => ObjectId.isValid(id))
-      .map((id) => new ObjectId(id));
-
-    const users = await usersCollection
-      .find({
-        $or: [
-          { _id: { $in: creatorIds } },
-          { _id: { $in: objectIdCreatorIds } },
-        ],
-      })
-      .toArray();
-
-    const userMap = {};
-    users.forEach((user) => {
-      userMap[user._id.toString()] = {
-        name: user.name || "Anonymous",
-        image: user.image || "",
-      };
-    });
-
-    const enrichedLessons = lessons.map((lesson) => {
-      const creator = userMap[lesson.creatorId] || {
-        name: "Anonymous",
-        image: "",
-      };
-      return {
-        ...lesson,
-        creatorName: creator.name,
-        creatorAvatar: creator.image,
-      };
-    });
-
-    return res.status(200).json(enrichedLessons);
-  } catch (error) {
-    console.error("Error fetching admin lessons:", error);
-    return res.status(500).json({
-      success: false,
-      message: "Failed to fetch admin lessons",
-      error: error.message,
-    });
-  }
-});
 
 // ADMIN: GET PLATFORM STATS
 app.get("/api/admin/stats", verifyToken, async (req, res) => {
