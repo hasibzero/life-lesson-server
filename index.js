@@ -797,7 +797,10 @@ app.get("/api/lessons", async (req, res) => {
       limit = 0,
     } = req.query;
 
-    const query = {};
+    // 👈 1. Strictly enforce reviewed lessons for public browsing
+    const query = {
+      isReviewed: true,
+    };
 
     if (visibility !== "all") {
       query.visibility = { $regex: new RegExp(`^${visibility}$`, "i") };
@@ -853,8 +856,10 @@ app.get("/api/lessons", async (req, res) => {
           .filter(Boolean),
       ),
     ];
+
+    // 👈 2. Strict 24-char hex check prevents BSON casting errors on custom string IDs
     const objectIdCreatorIds = creatorIds
-      .filter((id) => ObjectId.isValid(id))
+      .filter((id) => typeof id === "string" && /^[0-9a-fA-F]{24}$/.test(id))
       .map((id) => new ObjectId(id));
 
     const users = await usersCollection
