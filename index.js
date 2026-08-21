@@ -1588,10 +1588,6 @@ app.get("/", (req, res) => {
   res.send("Digital Life Lessons API is running!");
 });
 
-if (process.env.NODE_ENV !== "production") {
-  app.listen(port, () => {
-    console.log(`Server listening on port ${port}`);
-  });
-}
-
-module.exports = app;
+app.listen(port, () => {
+  console.log(`Server running on port ${port}`);
+});
