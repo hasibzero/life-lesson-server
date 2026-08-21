@@ -1611,6 +1611,12 @@ app.get("/", (req, res) => {
   res.send("Digital Life Lessons API is running!");
 });
 
-app.listen(port, () => {
-  console.log(`Server listening on port ${port}`);
-});
+// 1. Keep local development listener safe for your computer
+if (process.env.NODE_ENV !== "production") {
+  app.listen(port, () => {
+    console.log(`Server listening on port ${port}`);
+  });
+}
+
+// 2. Export the app for Vercel Serverless deployment
+module.exports = app;
