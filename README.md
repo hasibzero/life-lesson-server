@@ -6,8 +6,8 @@ The Life Lessons Server is a robust **Node.js & Express.js** REST API that power
 
 ## 🌐 Live URL
 
-- **Server API**: [https://life-lessons-server.vercel.app]()
-- **Frontend Client**: [https://life-lesson-client-hasib.vercel.app/](https://life-lesson-client-hasib.vercel.app/)
+- **Server API**: [https://life-lessons-server.vercel.app](https://life-lesson-server-hasib.vercel.app/)
+- **Frontend Client**: [[https://life-lesson-server-hasib.vercel.app/](https://life-lesson-client-hasib.vercel.app/)]()
 
 ---
 
