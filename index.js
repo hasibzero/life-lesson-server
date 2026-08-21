@@ -15,11 +15,11 @@ let clientUrl = process.env.CLIENT_URL || "http://localhost:3000";
 if (!clientUrl.startsWith("http://") && !clientUrl.startsWith("https://")) {
   clientUrl = `https://${clientUrl}`;
 }
-clientUrl = clientUrl.replace(/\/$/, ""); // Remove trailing slash if present
+clientUrl = clientUrl.replace(/\/$/, "");
 
 const JWKS = createRemoteJWKSet(new URL(`${clientUrl}/api/auth/jwks`));
 
-// 2. CORS configuration (mirrors origin so credentials: true works without wildcard conflicts)
+// 2. CORS configuration
 app.use(
   cors({
     origin: true,
@@ -29,7 +29,7 @@ app.use(
 );
 app.use(express.json());
 
-// 3. Database Initialization (declared globally so serverless routes mount immediately)
+// 3. Database Initialization
 const client = new MongoClient(uri, {
   serverApi: {
     version: ServerApiVersion.v1,
@@ -81,511 +81,7 @@ const verifyToken = async (req, res, next) => {
 };
 
 // ==========================================
-// 1. LESSON CRUD & USER DASHBOARD
-// ==========================================
-
-// CREATE LESSON
-app.post("/api/add-lesson", verifyToken, async (req, res) => {
-  try {
-    const lesson = req.body;
-    const verifiedUser = req.user;
-
-    let isAdmin = verifiedUser.role === "admin";
-    if (!isAdmin && lesson.creatorId) {
-      const userQuery = {
-        $or: [
-          { _id: lesson.creatorId },
-          ...(ObjectId.isValid(lesson.creatorId)
-            ? [{ _id: new ObjectId(lesson.creatorId) }]
-            : []),
-        ],
-      };
-      const userDoc = await usersCollection.findOne(userQuery);
-      isAdmin = userDoc?.role === "admin";
-    }
-
-    const newLesson = {
-      title: lesson.title.trim(),
-      description: lesson.description.trim(),
-      category: lesson.category,
-      emotionalTone: lesson.emotionalTone || "Motivational",
-      visibility: lesson.visibility || "Public",
-      accessLevel: lesson.accessLevel || "Free",
-      creatorId: lesson.creatorId || verifiedUser.id || verifiedUser.sub,
-      coverImage: lesson.coverImage || "",
-      likes: [],
-      likesCount: 0,
-      savedBy: [],
-      isFeatured: isAdmin ? Boolean(lesson.isFeatured) : false,
-      isReviewed: isAdmin,
-      createdAt: new Date(),
-      updatedAt: new Date(),
-    };
-
-    const result = await lessonsCollection.insertOne(newLesson);
-    return res.status(201).json({
-      success: true,
-      insertedId: result.insertedId,
-      isReviewed: newLesson.isReviewed,
-    });
-  } catch (error) {
-    console.error("Error adding lesson:", error);
-    return res.status(500).json({
-      success: false,
-      message: "Failed to create lesson",
-      error: error.message,
-    });
-  }
-});
-
-// GET MY LESSONS (All lessons including pending review)
-app.get("/api/my-lessons/:creatorId", verifyToken, async (req, res) => {
-  try {
-    const { creatorId } = req.params;
-
-    const query = {
-      $or: [
-        { creatorId: creatorId },
-        { userId: creatorId },
-        ...(ObjectId.isValid(creatorId)
-          ? [
-              { creatorId: new ObjectId(creatorId) },
-              { userId: new ObjectId(creatorId) },
-            ]
-          : []),
-      ],
-    };
-
-    const lessons = await lessonsCollection
-      .find(query)
-      .sort({ createdAt: -1 })
-      .toArray();
-
-    return res.status(200).json(lessons);
-  } catch (error) {
-    return res.status(500).json({ success: false, message: error.message });
-  }
-});
-
-// UPDATE LESSON
-app.patch("/api/update-lesson/:id", verifyToken, async (req, res) => {
-  try {
-    const { id } = req.params;
-
-    if (!ObjectId.isValid(id)) {
-      return res
-        .status(400)
-        .json({ success: false, message: "Invalid lesson ID format" });
-    }
-
-    const updateFields = { updatedAt: new Date() };
-    const allowedFields = [
-      "title",
-      "description",
-      "category",
-      "emotionalTone",
-      "visibility",
-      "accessLevel",
-      "coverImage",
-      "isFeatured",
-      "isReviewed",
-    ];
-
-    allowedFields.forEach((field) => {
-      if (req.body[field] !== undefined) {
-        updateFields[field] = req.body[field];
-      }
-    });
-
-    const result = await lessonsCollection.updateOne(
-      { _id: new ObjectId(id) },
-      { $set: updateFields },
-    );
-
-    if (result.matchedCount === 0) {
-      return res
-        .status(404)
-        .json({ success: false, message: "Lesson not found" });
-    }
-
-    return res.status(200).json({
-      success: true,
-      message: "Lesson updated successfully",
-      result,
-    });
-  } catch (error) {
-    console.error("Error updating lesson:", error);
-    return res.status(500).json({
-      success: false,
-      message: "Failed to update lesson",
-      error: error.message,
-    });
-  }
-});
-
-// DELETE LESSON (With Cascade Report Resolution)
-app.delete("/api/lessons/:id", verifyToken, async (req, res) => {
-  try {
-    const { id } = req.params;
-
-    const lessonQuery = {
-      $or: [
-        { _id: id },
-        ...(ObjectId.isValid(id) ? [{ _id: new ObjectId(id) }] : []),
-      ],
-    };
-
-    const deleteResult = await lessonsCollection.deleteOne(lessonQuery);
-
-    if (deleteResult.deletedCount === 0) {
-      return res
-        .status(404)
-        .json({ success: false, message: "Lesson not found" });
-    }
-
-    await reportsCollection.updateMany(
-      {
-        $or: [
-          { lessonId: id },
-          ...(ObjectId.isValid(id) ? [{ lessonId: new ObjectId(id) }] : []),
-        ],
-      },
-      {
-        $set: {
-          status: "resolved",
-          actionTaken: "lesson_deleted",
-          resolvedAt: new Date(),
-          updatedAt: new Date(),
-        },
-      },
-    );
-
-    return res.status(200).json({
-      success: true,
-      message: "Lesson permanently deleted and associated reports resolved.",
-    });
-  } catch (error) {
-    console.error("Error deleting lesson:", error);
-    return res.status(500).json({
-      success: false,
-      message: "Failed to delete lesson",
-      error: error.message,
-    });
-  }
-});
-
-// GET SAVED LESSONS (With Author Enrichment)
-app.get("/api/saved-lessons/:userId", verifyToken, async (req, res) => {
-  try {
-    const { userId } = req.params;
-
-    const query = {
-      $or: [
-        { savedBy: userId },
-        ...(ObjectId.isValid(userId)
-          ? [{ savedBy: new ObjectId(userId) }]
-          : []),
-      ],
-    };
-
-    const lessons = await lessonsCollection
-      .find(query)
-      .sort({ createdAt: -1 })
-      .toArray();
-
-    if (!lessons.length) return res.status(200).json([]);
-
-    const creatorIds = [
-      ...new Set(
-        lessons
-          .map((l) => l.creatorId || l.userId || l.authorId)
-          .filter(Boolean),
-      ),
-    ];
-    const objectIdCreatorIds = creatorIds
-      .filter((id) => ObjectId.isValid(id))
-      .map((id) => new ObjectId(id));
-
-    const users = await usersCollection
-      .find({
-        $or: [
-          { _id: { $in: creatorIds } },
-          { _id: { $in: objectIdCreatorIds } },
-        ],
-      })
-      .toArray();
-
-    const userMap = {};
-    users.forEach((u) => {
-      userMap[u._id.toString()] = {
-        name: u.name || u.displayName || u.email || "Community Creator",
-        image: u.image || "",
-      };
-    });
-
-    const enrichedLessons = lessons.map((lesson) => {
-      const cId = (
-        lesson.creatorId ||
-        lesson.userId ||
-        lesson.authorId
-      )?.toString();
-      const author = userMap[cId];
-
-      return {
-        ...lesson,
-        creatorName: lesson.creatorName || author?.name || "Community Creator",
-        creatorAvatar: lesson.creatorAvatar || author?.image || "",
-      };
-    });
-
-    return res.status(200).json(enrichedLessons);
-  } catch (error) {
-    console.error("Error fetching saved lessons:", error);
-    return res.status(500).json({
-      success: false,
-      message: "Failed to fetch saved lessons",
-      error: error.message,
-    });
-  }
-});
-
-// ==========================================
-// 2. ENGAGEMENT (LIKE, BOOKMARK, COMMENTS, REPORT)
-// ==========================================
-
-// TOGGLE LIKE
-app.post("/api/lessons/:id/like", verifyToken, async (req, res) => {
-  try {
-    const { id } = req.params;
-    const { userId } = req.body;
-
-    if (!ObjectId.isValid(id) || !userId) {
-      return res
-        .status(400)
-        .json({ success: false, message: "Invalid ID or User ID missing" });
-    }
-
-    const lesson = await lessonsCollection.findOne({
-      _id: new ObjectId(id),
-    });
-    if (!lesson) {
-      return res
-        .status(404)
-        .json({ success: false, message: "Lesson not found" });
-    }
-
-    const likes = lesson.likes || [];
-    const isAlreadyLiked = likes.includes(userId);
-
-    const updateQuery = isAlreadyLiked
-      ? { $pull: { likes: userId }, $inc: { likesCount: -1 } }
-      : { $addToSet: { likes: userId }, $inc: { likesCount: 1 } };
-
-    const updatedLesson = await lessonsCollection.findOneAndUpdate(
-      { _id: new ObjectId(id) },
-      updateQuery,
-      { returnDocument: "after" },
-    );
-
-    return res.status(200).json({
-      success: true,
-      isLiked: !isAlreadyLiked,
-      likesCount: updatedLesson.likesCount,
-    });
-  } catch (error) {
-    console.error("Error toggling like:", error);
-    return res.status(500).json({
-      success: false,
-      message: "Server error while updating like",
-    });
-  }
-});
-
-// TOGGLE BOOKMARK
-app.post("/api/lessons/:id/bookmark", verifyToken, async (req, res) => {
-  try {
-    const { id } = req.params;
-    const { userId } = req.body;
-
-    if (!ObjectId.isValid(id) || !userId) {
-      return res
-        .status(400)
-        .json({ success: false, message: "Invalid ID or User ID missing" });
-    }
-
-    const lesson = await lessonsCollection.findOne({
-      _id: new ObjectId(id),
-    });
-    if (!lesson) {
-      return res
-        .status(404)
-        .json({ success: false, message: "Lesson not found" });
-    }
-
-    const savedBy = lesson.savedBy || [];
-    const isAlreadyBookmarked = savedBy.includes(userId);
-
-    const updateQuery = isAlreadyBookmarked
-      ? { $pull: { savedBy: userId } }
-      : { $addToSet: { savedBy: userId } };
-
-    await lessonsCollection.updateOne({ _id: new ObjectId(id) }, updateQuery);
-
-    return res.status(200).json({
-      success: true,
-      isBookmarked: !isAlreadyBookmarked,
-      message: isAlreadyBookmarked
-        ? "Bookmark removed"
-        : "Lesson bookmarked successfully!",
-    });
-  } catch (error) {
-    console.error("Error toggling bookmark:", error);
-    return res.status(500).json({
-      success: false,
-      message: "Server error while bookmarking",
-    });
-  }
-});
-
-// GET COMMENTS
-app.get("/api/comments/:lessonId", verifyToken, async (req, res) => {
-  try {
-    const { lessonId } = req.params;
-
-    const comments = await commentsCollection
-      .aggregate([
-        { $match: { lessonId: lessonId } },
-        { $sort: { createdAt: -1 } },
-        {
-          $lookup: {
-            from: "user",
-            localField: "userId",
-            foreignField: "_id",
-            as: "creatorInfo",
-          },
-        },
-        {
-          $unwind: {
-            path: "$creatorInfo",
-            preserveNullAndEmptyArrays: true,
-          },
-        },
-        {
-          $project: {
-            text: 1,
-            createdAt: 1,
-            creatorName: "$creatorInfo.name",
-            creatorAvatar: "$creatorInfo.image",
-          },
-        },
-      ])
-      .toArray();
-
-    return res.status(200).json(comments);
-  } catch (error) {
-    console.error("Error fetching comments:", error);
-    return res.status(500).json({
-      success: false,
-      message: "Failed to fetch comments",
-    });
-  }
-});
-
-// POST COMMENT
-app.post("/api/comments", verifyToken, async (req, res) => {
-  try {
-    const { lessonId, userId, text } = req.body;
-
-    if (!lessonId || !userId || !text?.trim()) {
-      return res
-        .status(400)
-        .json({ success: false, message: "Missing required fields" });
-    }
-
-    let finalUserId = userId;
-    if (ObjectId.isValid(userId) && String(new ObjectId(userId)) === userId) {
-      finalUserId = new ObjectId(userId);
-    }
-
-    const newComment = {
-      lessonId: lessonId,
-      userId: finalUserId,
-      text: text.trim(),
-      createdAt: new Date(),
-    };
-
-    const result = await commentsCollection.insertOne(newComment);
-    return res.status(201).json({
-      _id: result.insertedId,
-      ...newComment,
-    });
-  } catch (error) {
-    console.error("Error posting comment:", error);
-    return res.status(500).json({
-      success: false,
-      message: "Failed to post comment",
-      error: error.message,
-    });
-  }
-});
-
-// SUBMIT REPORT
-app.post("/api/lessons/:id/report", verifyToken, async (req, res) => {
-  try {
-    const { id } = req.params;
-    const { reporterUserId, reportedUserEmail, reason, details } = req.body;
-
-    const targetLesson = await lessonsCollection.findOne({
-      $or: [
-        { _id: id },
-        ...(ObjectId.isValid(id) ? [{ _id: new ObjectId(id) }] : []),
-      ],
-    });
-
-    let creatorName = targetLesson?.creatorName || targetLesson?.authorName;
-    const creatorId =
-      targetLesson?.creatorId || targetLesson?.userId || targetLesson?.authorId;
-
-    if (!creatorName && creatorId) {
-      const authorUser = await usersCollection.findOne({
-        $or: [
-          { _id: creatorId.toString() },
-          ...(ObjectId.isValid(creatorId)
-            ? [{ _id: new ObjectId(creatorId) }]
-            : []),
-        ],
-      });
-      creatorName = authorUser?.name || authorUser?.email;
-    }
-
-    const newReport = {
-      lessonId: id,
-      lessonTitle: targetLesson?.title || "Untitled Lesson",
-      creatorId: creatorId ? creatorId.toString() : null,
-      creatorName: creatorName || "Community Creator",
-      reporterUserId: reporterUserId,
-      reporterEmail: reportedUserEmail || "Anonymous",
-      reason: reason,
-      details: details || "",
-      status: "pending",
-      createdAt: new Date(),
-      updatedAt: new Date(),
-    };
-
-    const result = await reportsCollection.insertOne(newReport);
-    return res.status(201).json({
-      success: true,
-      message: "Report submitted successfully.",
-      reportId: result.insertedId,
-    });
-  } catch (error) {
-    console.error("Error submitting report:", error);
-    return res.status(500).json({ success: false, message: error.message });
-  }
-});
-
-// ==========================================
-// 3. PUBLIC EXPLORE & DISCOVERY ROUTES
+// 1. STATIC & DISCOVERY ROUTES (MUST BE FIRST)
 // ==========================================
 
 // GET FEATURED LESSONS
@@ -726,198 +222,7 @@ app.get("/api/lessons/most-saved", async (req, res) => {
   }
 });
 
-// GET ALL PUBLIC LESSONS (Filter, Search, Pagination)
-app.get("/api/lessons", async (req, res) => {
-  try {
-    const {
-      search = "",
-      category = "All",
-      emotionalTone = "All",
-      accessLevel = "All",
-      visibility = "Public",
-      sortBy = "newest",
-      page = 1,
-      limit = 0,
-    } = req.query;
-
-    const query = {};
-
-    if (visibility !== "all") {
-      query.visibility = { $regex: new RegExp(`^${visibility}$`, "i") };
-    }
-    if (category && category !== "All") query.category = category;
-    if (emotionalTone && emotionalTone !== "All")
-      query.emotionalTone = emotionalTone;
-    if (accessLevel && accessLevel !== "All") query.accessLevel = accessLevel;
-
-    if (search.trim()) {
-      const searchRegex = new RegExp(search.trim(), "i");
-      const matchingUsers = await usersCollection
-        .find({ name: searchRegex })
-        .project({ _id: 1 })
-        .toArray();
-
-      const matchingUserIds = matchingUsers.map((u) => u._id.toString());
-      const matchingUserObjectIds = matchingUsers.map((u) => u._id);
-
-      query.$or = [
-        { title: searchRegex },
-        { description: searchRegex },
-        { creatorName: searchRegex },
-        {
-          creatorId: {
-            $in: [...matchingUserIds, ...matchingUserObjectIds],
-          },
-        },
-      ];
-    }
-
-    let sortOptions = { createdAt: -1 };
-    if (sortBy === "oldest") sortOptions = { createdAt: 1 };
-    else if (sortBy === "popular") sortOptions = { views: -1, likesCount: -1 };
-
-    const pageNumber = Math.max(1, parseInt(page, 10) || 1);
-    const limitNumber = parseInt(limit, 10) || 0;
-    const skip = limitNumber > 0 ? (pageNumber - 1) * limitNumber : 0;
-
-    const totalLessons = await lessonsCollection.countDocuments(query);
-    let lessonsCursor = lessonsCollection
-      .find(query)
-      .sort(sortOptions)
-      .skip(skip);
-
-    if (limitNumber > 0) lessonsCursor = lessonsCursor.limit(limitNumber);
-    const lessons = await lessonsCursor.toArray();
-
-    const creatorIds = [
-      ...new Set(
-        lessons
-          .map((lesson) => lesson.creatorId || lesson.userId)
-          .filter(Boolean),
-      ),
-    ];
-    const objectIdCreatorIds = creatorIds
-      .filter((id) => ObjectId.isValid(id))
-      .map((id) => new ObjectId(id));
-
-    const users = await usersCollection
-      .find({
-        $or: [
-          { _id: { $in: creatorIds } },
-          { _id: { $in: objectIdCreatorIds } },
-        ],
-      })
-      .toArray();
-
-    const userMap = {};
-    users.forEach((user) => {
-      userMap[user._id.toString()] = {
-        name: user.name || "Anonymous Creator",
-        image: user.image || "",
-      };
-    });
-
-    const enrichedLessons = lessons.map((lesson) => {
-      const creatorIdStr = (lesson.creatorId || lesson.userId)?.toString();
-      const creator = userMap[creatorIdStr] || {
-        name: lesson.creatorName || "Anonymous Creator",
-        image: lesson.creatorAvatar || "",
-      };
-
-      return {
-        ...lesson,
-        creatorName: creator.name,
-        creatorAvatar: creator.image,
-      };
-    });
-
-    if (limitNumber > 0) {
-      return res.status(200).json({
-        success: true,
-        total: totalLessons,
-        page: pageNumber,
-        totalPages: Math.ceil(totalLessons / limitNumber),
-        data: enrichedLessons,
-      });
-    }
-
-    return res.status(200).json(enrichedLessons);
-  } catch (error) {
-    console.error("Error fetching lessons:", error);
-    return res.status(500).json({
-      success: false,
-      message: "Failed to fetch query-based lessons",
-      error: error.message,
-    });
-  }
-});
-
-// GET AUTHOR PROFILE & PUBLIC LESSONS
-app.get("/api/author-profile/:id", async (req, res) => {
-  try {
-    const { id } = req.params;
-
-    if (!id || id === "undefined") {
-      return res
-        .status(400)
-        .json({ success: false, message: "Valid Author ID is required" });
-    }
-
-    const userDoc = await usersCollection.findOne({
-      $or: [
-        { _id: id },
-        ...(ObjectId.isValid(id) ? [{ _id: new ObjectId(id) }] : []),
-      ],
-    });
-
-    const author = {
-      id: id,
-      name: userDoc?.name || userDoc?.email || "Anonymous Creator",
-      image: userDoc?.image || "",
-      role: userDoc?.role || "user",
-    };
-
-    const lessons = await lessonsCollection
-      .find({
-        $or: [
-          { creatorId: id },
-          { userId: id },
-          { authorId: id },
-          ...(ObjectId.isValid(id)
-            ? [
-                { creatorId: new ObjectId(id) },
-                { userId: new ObjectId(id) },
-                { authorId: new ObjectId(id) },
-              ]
-            : []),
-        ],
-        visibility: "Public",
-      })
-      .sort({ createdAt: -1 })
-      .toArray();
-
-    const enrichedLessons = lessons.map((lesson) => ({
-      ...lesson,
-      creatorName: author.name,
-      creatorAvatar: author.image,
-    }));
-
-    return res.status(200).json({
-      success: true,
-      author,
-      lessons: enrichedLessons,
-    });
-  } catch (error) {
-    console.error("Error fetching author profile:", error);
-    return res.status(500).json({
-      success: false,
-      message: "Failed to fetch author profile",
-      error: error.message,
-    });
-  }
-});
-
-// GET TOP CONTRIBUTORS OF THE WEEK
+// GET TOP CONTRIBUTORS
 app.get("/api/top-contributors", async (req, res) => {
   try {
     const sevenDaysAgo = new Date();
@@ -1015,9 +320,11 @@ app.get("/api/top-contributors", async (req, res) => {
   }
 });
 
+// ==========================================
+// 2. ADMIN STATIC ROUTES (MUST BE BEFORE :id ROUTES)
+// ==========================================
 
-
-
+// ADMIN: GET ALL LESSONS
 app.get("/api/lessons/admin-all", verifyToken, async (req, res) => {
   try {
     const lessons = await lessonsCollection
@@ -1071,69 +378,6 @@ app.get("/api/lessons/admin-all", verifyToken, async (req, res) => {
     });
   }
 });
-// GET SINGLE LESSON (Public access without token barrier)
-
-app.get("/api/lessons/:id", async (req, res) => {
-  try {
-    const { id } = req.params;
-
-    if (!ObjectId.isValid(id)) {
-      return res
-        .status(400)
-        .json({ success: false, message: "Invalid Lesson ID" });
-    }
-
-    const lesson = await lessonsCollection.findOne({
-      _id: new ObjectId(id),
-    });
-    if (!lesson) {
-      return res
-        .status(404)
-        .json({ success: false, message: "Lesson not found" });
-    }
-
-    const creatorId =
-      lesson.creatorId || lesson.userId || lesson.authorId || null;
-    let creatorName = lesson.creatorName || "Anonymous";
-    let creatorAvatar = "";
-
-    if (creatorId) {
-      const userDoc = await usersCollection.findOne({
-        $or: [
-          { _id: creatorId },
-          ...(ObjectId.isValid(creatorId)
-            ? [{ _id: new ObjectId(creatorId) }]
-            : []),
-        ],
-      });
-      if (userDoc) {
-        creatorName = userDoc.name || userDoc.email || creatorName;
-        creatorAvatar = userDoc.image || "";
-      }
-    }
-
-    return res.status(200).json({
-      ...lesson,
-      creatorId: creatorId ? creatorId.toString() : null,
-      creatorName,
-      creatorAvatar,
-    });
-  } catch (error) {
-    console.error("Error fetching lesson:", error);
-    return res.status(500).json({
-      success: false,
-      message: "Server error",
-      error: error.message,
-    });
-  }
-});
-
-// ==========================================
-// 4. ADMIN DASHBOARD & USER MANAGEMENT
-// ==========================================
-
-// ADMIN: GET ALL LESSONS
-
 
 // ADMIN: GET PLATFORM STATS
 app.get("/api/admin/stats", verifyToken, async (req, res) => {
@@ -1536,9 +780,757 @@ app.delete("/api/admin/users/:id", verifyToken, async (req, res) => {
 });
 
 // ==========================================
-// 5. SUBSCRIPTION & PAYMENT WEBHOOKS
+// 3. PUBLIC QUERY & PARAMETERIZED ROUTES
 // ==========================================
 
+// GET ALL PUBLIC LESSONS (Filter, Search, Pagination)
+app.get("/api/lessons", async (req, res) => {
+  try {
+    const {
+      search = "",
+      category = "All",
+      emotionalTone = "All",
+      accessLevel = "All",
+      visibility = "Public",
+      sortBy = "newest",
+      page = 1,
+      limit = 0,
+    } = req.query;
+
+    const query = {};
+
+    if (visibility !== "all") {
+      query.visibility = { $regex: new RegExp(`^${visibility}$`, "i") };
+    }
+    if (category && category !== "All") query.category = category;
+    if (emotionalTone && emotionalTone !== "All")
+      query.emotionalTone = emotionalTone;
+    if (accessLevel && accessLevel !== "All") query.accessLevel = accessLevel;
+
+    if (search.trim()) {
+      const searchRegex = new RegExp(search.trim(), "i");
+      const matchingUsers = await usersCollection
+        .find({ name: searchRegex })
+        .project({ _id: 1 })
+        .toArray();
+
+      const matchingUserIds = matchingUsers.map((u) => u._id.toString());
+      const matchingUserObjectIds = matchingUsers.map((u) => u._id);
+
+      query.$or = [
+        { title: searchRegex },
+        { description: searchRegex },
+        { creatorName: searchRegex },
+        {
+          creatorId: {
+            $in: [...matchingUserIds, ...matchingUserObjectIds],
+          },
+        },
+      ];
+    }
+
+    let sortOptions = { createdAt: -1 };
+    if (sortBy === "oldest") sortOptions = { createdAt: 1 };
+    else if (sortBy === "popular") sortOptions = { views: -1, likesCount: -1 };
+
+    const pageNumber = Math.max(1, parseInt(page, 10) || 1);
+    const limitNumber = parseInt(limit, 10) || 0;
+    const skip = limitNumber > 0 ? (pageNumber - 1) * limitNumber : 0;
+
+    const totalLessons = await lessonsCollection.countDocuments(query);
+    let lessonsCursor = lessonsCollection
+      .find(query)
+      .sort(sortOptions)
+      .skip(skip);
+
+    if (limitNumber > 0) lessonsCursor = lessonsCursor.limit(limitNumber);
+    const lessons = await lessonsCursor.toArray();
+
+    const creatorIds = [
+      ...new Set(
+        lessons
+          .map((lesson) => lesson.creatorId || lesson.userId)
+          .filter(Boolean),
+      ),
+    ];
+    const objectIdCreatorIds = creatorIds
+      .filter((id) => ObjectId.isValid(id))
+      .map((id) => new ObjectId(id));
+
+    const users = await usersCollection
+      .find({
+        $or: [
+          { _id: { $in: creatorIds } },
+          { _id: { $in: objectIdCreatorIds } },
+        ],
+      })
+      .toArray();
+
+    const userMap = {};
+    users.forEach((user) => {
+      userMap[user._id.toString()] = {
+        name: user.name || "Anonymous Creator",
+        image: user.image || "",
+      };
+    });
+
+    const enrichedLessons = lessons.map((lesson) => {
+      const creatorIdStr = (lesson.creatorId || lesson.userId)?.toString();
+      const creator = userMap[creatorIdStr] || {
+        name: lesson.creatorName || "Anonymous Creator",
+        image: lesson.creatorAvatar || "",
+      };
+
+      return {
+        ...lesson,
+        creatorName: creator.name,
+        creatorAvatar: creator.image,
+      };
+    });
+
+    if (limitNumber > 0) {
+      return res.status(200).json({
+        success: true,
+        total: totalLessons,
+        page: pageNumber,
+        totalPages: Math.ceil(totalLessons / limitNumber),
+        data: enrichedLessons,
+      });
+    }
+
+    return res.status(200).json(enrichedLessons);
+  } catch (error) {
+    console.error("Error fetching lessons:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to fetch query-based lessons",
+      error: error.message,
+    });
+  }
+});
+
+// GET AUTHOR PROFILE & PUBLIC LESSONS
+app.get("/api/author-profile/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    if (!id || id === "undefined") {
+      return res
+        .status(400)
+        .json({ success: false, message: "Valid Author ID is required" });
+    }
+
+    const userDoc = await usersCollection.findOne({
+      $or: [
+        { _id: id },
+        ...(ObjectId.isValid(id) ? [{ _id: new ObjectId(id) }] : []),
+      ],
+    });
+
+    const author = {
+      id: id,
+      name: userDoc?.name || userDoc?.email || "Anonymous Creator",
+      image: userDoc?.image || "",
+      role: userDoc?.role || "user",
+    };
+
+    const lessons = await lessonsCollection
+      .find({
+        $or: [
+          { creatorId: id },
+          { userId: id },
+          { authorId: id },
+          ...(ObjectId.isValid(id)
+            ? [
+                { creatorId: new ObjectId(id) },
+                { userId: new ObjectId(id) },
+                { authorId: new ObjectId(id) },
+              ]
+            : []),
+        ],
+        visibility: "Public",
+      })
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    const enrichedLessons = lessons.map((lesson) => ({
+      ...lesson,
+      creatorName: author.name,
+      creatorAvatar: author.image,
+    }));
+
+    return res.status(200).json({
+      success: true,
+      author,
+      lessons: enrichedLessons,
+    });
+  } catch (error) {
+    console.error("Error fetching author profile:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to fetch author profile",
+      error: error.message,
+    });
+  }
+});
+
+// GET SINGLE LESSON (Placed AFTER /api/lessons/admin-all, featured, most-saved)
+app.get("/api/lessons/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    if (!ObjectId.isValid(id)) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Invalid Lesson ID" });
+    }
+
+    const lesson = await lessonsCollection.findOne({
+      _id: new ObjectId(id),
+    });
+    if (!lesson) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Lesson not found" });
+    }
+
+    const creatorId =
+      lesson.creatorId || lesson.userId || lesson.authorId || null;
+    let creatorName = lesson.creatorName || "Anonymous";
+    let creatorAvatar = "";
+
+    if (creatorId) {
+      const userDoc = await usersCollection.findOne({
+        $or: [
+          { _id: creatorId },
+          ...(ObjectId.isValid(creatorId)
+            ? [{ _id: new ObjectId(creatorId) }]
+            : []),
+        ],
+      });
+      if (userDoc) {
+        creatorName = userDoc.name || userDoc.email || creatorName;
+        creatorAvatar = userDoc.image || "";
+      }
+    }
+
+    return res.status(200).json({
+      ...lesson,
+      creatorId: creatorId ? creatorId.toString() : null,
+      creatorName,
+      creatorAvatar,
+    });
+  } catch (error) {
+    console.error("Error fetching lesson:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Server error",
+      error: error.message,
+    });
+  }
+});
+
+// ==========================================
+// 4. LESSON MANAGEMENT & ENGAGEMENT
+// ==========================================
+
+// CREATE LESSON
+app.post("/api/add-lesson", verifyToken, async (req, res) => {
+  try {
+    const lesson = req.body;
+    const verifiedUser = req.user;
+
+    let isAdmin = verifiedUser.role === "admin";
+    if (!isAdmin && lesson.creatorId) {
+      const userQuery = {
+        $or: [
+          { _id: lesson.creatorId },
+          ...(ObjectId.isValid(lesson.creatorId)
+            ? [{ _id: new ObjectId(lesson.creatorId) }]
+            : []),
+        ],
+      };
+      const userDoc = await usersCollection.findOne(userQuery);
+      isAdmin = userDoc?.role === "admin";
+    }
+
+    const newLesson = {
+      title: lesson.title.trim(),
+      description: lesson.description.trim(),
+      category: lesson.category,
+      emotionalTone: lesson.emotionalTone || "Motivational",
+      visibility: lesson.visibility || "Public",
+      accessLevel: lesson.accessLevel || "Free",
+      creatorId: lesson.creatorId || verifiedUser.id || verifiedUser.sub,
+      coverImage: lesson.coverImage || "",
+      likes: [],
+      likesCount: 0,
+      savedBy: [],
+      isFeatured: isAdmin ? Boolean(lesson.isFeatured) : false,
+      isReviewed: isAdmin,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+
+    const result = await lessonsCollection.insertOne(newLesson);
+    return res.status(201).json({
+      success: true,
+      insertedId: result.insertedId,
+      isReviewed: newLesson.isReviewed,
+    });
+  } catch (error) {
+    console.error("Error adding lesson:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to create lesson",
+      error: error.message,
+    });
+  }
+});
+
+// GET MY LESSONS
+app.get("/api/my-lessons/:creatorId", verifyToken, async (req, res) => {
+  try {
+    const { creatorId } = req.params;
+
+    const query = {
+      $or: [
+        { creatorId: creatorId },
+        { userId: creatorId },
+        ...(ObjectId.isValid(creatorId)
+          ? [
+              { creatorId: new ObjectId(creatorId) },
+              { userId: new ObjectId(creatorId) },
+            ]
+          : []),
+      ],
+    };
+
+    const lessons = await lessonsCollection
+      .find(query)
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    return res.status(200).json(lessons);
+  } catch (error) {
+    return res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// UPDATE LESSON
+app.patch("/api/update-lesson/:id", verifyToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    if (!ObjectId.isValid(id)) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Invalid lesson ID format" });
+    }
+
+    const updateFields = { updatedAt: new Date() };
+    const allowedFields = [
+      "title",
+      "description",
+      "category",
+      "emotionalTone",
+      "visibility",
+      "accessLevel",
+      "coverImage",
+      "isFeatured",
+      "isReviewed",
+    ];
+
+    allowedFields.forEach((field) => {
+      if (req.body[field] !== undefined) {
+        updateFields[field] = req.body[field];
+      }
+    });
+
+    const result = await lessonsCollection.updateOne(
+      { _id: new ObjectId(id) },
+      { $set: updateFields },
+    );
+
+    if (result.matchedCount === 0) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Lesson not found" });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: "Lesson updated successfully",
+      result,
+    });
+  } catch (error) {
+    console.error("Error updating lesson:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to update lesson",
+      error: error.message,
+    });
+  }
+});
+
+// DELETE LESSON
+app.delete("/api/lessons/:id", verifyToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const lessonQuery = {
+      $or: [
+        { _id: id },
+        ...(ObjectId.isValid(id) ? [{ _id: new ObjectId(id) }] : []),
+      ],
+    };
+
+    const deleteResult = await lessonsCollection.deleteOne(lessonQuery);
+
+    if (deleteResult.deletedCount === 0) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Lesson not found" });
+    }
+
+    await reportsCollection.updateMany(
+      {
+        $or: [
+          { lessonId: id },
+          ...(ObjectId.isValid(id) ? [{ lessonId: new ObjectId(id) }] : []),
+        ],
+      },
+      {
+        $set: {
+          status: "resolved",
+          actionTaken: "lesson_deleted",
+          resolvedAt: new Date(),
+          updatedAt: new Date(),
+        },
+      },
+    );
+
+    return res.status(200).json({
+      success: true,
+      message: "Lesson permanently deleted and associated reports resolved.",
+    });
+  } catch (error) {
+    console.error("Error deleting lesson:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to delete lesson",
+      error: error.message,
+    });
+  }
+});
+
+// GET SAVED LESSONS
+app.get("/api/saved-lessons/:userId", verifyToken, async (req, res) => {
+  try {
+    const { userId } = req.params;
+
+    const query = {
+      $or: [
+        { savedBy: userId },
+        ...(ObjectId.isValid(userId)
+          ? [{ savedBy: new ObjectId(userId) }]
+          : []),
+      ],
+    };
+
+    const lessons = await lessonsCollection
+      .find(query)
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    if (!lessons.length) return res.status(200).json([]);
+
+    const creatorIds = [
+      ...new Set(
+        lessons
+          .map((l) => l.creatorId || l.userId || l.authorId)
+          .filter(Boolean),
+      ),
+    ];
+    const objectIdCreatorIds = creatorIds
+      .filter((id) => ObjectId.isValid(id))
+      .map((id) => new ObjectId(id));
+
+    const users = await usersCollection
+      .find({
+        $or: [
+          { _id: { $in: creatorIds } },
+          { _id: { $in: objectIdCreatorIds } },
+        ],
+      })
+      .toArray();
+
+    const userMap = {};
+    users.forEach((u) => {
+      userMap[u._id.toString()] = {
+        name: u.name || u.displayName || u.email || "Community Creator",
+        image: u.image || "",
+      };
+    });
+
+    const enrichedLessons = lessons.map((lesson) => {
+      const cId = (
+        lesson.creatorId ||
+        lesson.userId ||
+        lesson.authorId
+      )?.toString();
+      const author = userMap[cId];
+
+      return {
+        ...lesson,
+        creatorName: lesson.creatorName || author?.name || "Community Creator",
+        creatorAvatar: lesson.creatorAvatar || author?.image || "",
+      };
+    });
+
+    return res.status(200).json(enrichedLessons);
+  } catch (error) {
+    console.error("Error fetching saved lessons:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to fetch saved lessons",
+      error: error.message,
+    });
+  }
+});
+
+// TOGGLE LIKE
+app.post("/api/lessons/:id/like", verifyToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { userId } = req.body;
+
+    if (!ObjectId.isValid(id) || !userId) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Invalid ID or User ID missing" });
+    }
+
+    const lesson = await lessonsCollection.findOne({
+      _id: new ObjectId(id),
+    });
+    if (!lesson) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Lesson not found" });
+    }
+
+    const likes = lesson.likes || [];
+    const isAlreadyLiked = likes.includes(userId);
+
+    const updateQuery = isAlreadyLiked
+      ? { $pull: { likes: userId }, $inc: { likesCount: -1 } }
+      : { $addToSet: { likes: userId }, $inc: { likesCount: 1 } };
+
+    const updatedLesson = await lessonsCollection.findOneAndUpdate(
+      { _id: new ObjectId(id) },
+      updateQuery,
+      { returnDocument: "after" },
+    );
+
+    return res.status(200).json({
+      success: true,
+      isLiked: !isAlreadyLiked,
+      likesCount: updatedLesson.likesCount,
+    });
+  } catch (error) {
+    console.error("Error toggling like:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Server error while updating like",
+    });
+  }
+});
+
+// TOGGLE BOOKMARK
+app.post("/api/lessons/:id/bookmark", verifyToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { userId } = req.body;
+
+    if (!ObjectId.isValid(id) || !userId) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Invalid ID or User ID missing" });
+    }
+
+    const lesson = await lessonsCollection.findOne({
+      _id: new ObjectId(id),
+    });
+    if (!lesson) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Lesson not found" });
+    }
+
+    const savedBy = lesson.savedBy || [];
+    const isAlreadyBookmarked = savedBy.includes(userId);
+
+    const updateQuery = isAlreadyBookmarked
+      ? { $pull: { savedBy: userId } }
+      : { $addToSet: { savedBy: userId } };
+
+    await lessonsCollection.updateOne({ _id: new ObjectId(id) }, updateQuery);
+
+    return res.status(200).json({
+      success: true,
+      isBookmarked: !isAlreadyBookmarked,
+      message: isAlreadyBookmarked
+        ? "Bookmark removed"
+        : "Lesson bookmarked successfully!",
+    });
+  } catch (error) {
+    console.error("Error toggling bookmark:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Server error while bookmarking",
+    });
+  }
+});
+
+// GET COMMENTS
+app.get("/api/comments/:lessonId", verifyToken, async (req, res) => {
+  try {
+    const { lessonId } = req.params;
+
+    const comments = await commentsCollection
+      .aggregate([
+        { $match: { lessonId: lessonId } },
+        { $sort: { createdAt: -1 } },
+        {
+          $lookup: {
+            from: "user",
+            localField: "userId",
+            foreignField: "_id",
+            as: "creatorInfo",
+          },
+        },
+        {
+          $unwind: {
+            path: "$creatorInfo",
+            preserveNullAndEmptyArrays: true,
+          },
+        },
+        {
+          $project: {
+            text: 1,
+            createdAt: 1,
+            creatorName: "$creatorInfo.name",
+            creatorAvatar: "$creatorInfo.image",
+          },
+        },
+      ])
+      .toArray();
+
+    return res.status(200).json(comments);
+  } catch (error) {
+    console.error("Error fetching comments:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to fetch comments",
+    });
+  }
+});
+
+// POST COMMENT
+app.post("/api/comments", verifyToken, async (req, res) => {
+  try {
+    const { lessonId, userId, text } = req.body;
+
+    if (!lessonId || !userId || !text?.trim()) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Missing required fields" });
+    }
+
+    let finalUserId = userId;
+    if (ObjectId.isValid(userId) && String(new ObjectId(userId)) === userId) {
+      finalUserId = new ObjectId(userId);
+    }
+
+    const newComment = {
+      lessonId: lessonId,
+      userId: finalUserId,
+      text: text.trim(),
+      createdAt: new Date(),
+    };
+
+    const result = await commentsCollection.insertOne(newComment);
+    return res.status(201).json({
+      _id: result.insertedId,
+      ...newComment,
+    });
+  } catch (error) {
+    console.error("Error posting comment:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to post comment",
+      error: error.message,
+    });
+  }
+});
+
+// SUBMIT REPORT
+app.post("/api/lessons/:id/report", verifyToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { reporterUserId, reportedUserEmail, reason, details } = req.body;
+
+    const targetLesson = await lessonsCollection.findOne({
+      $or: [
+        { _id: id },
+        ...(ObjectId.isValid(id) ? [{ _id: new ObjectId(id) }] : []),
+      ],
+    });
+
+    let creatorName = targetLesson?.creatorName || targetLesson?.authorName;
+    const creatorId =
+      targetLesson?.creatorId || targetLesson?.userId || targetLesson?.authorId;
+
+    if (!creatorName && creatorId) {
+      const authorUser = await usersCollection.findOne({
+        $or: [
+          { _id: creatorId.toString() },
+          ...(ObjectId.isValid(creatorId)
+            ? [{ _id: new ObjectId(creatorId) }]
+            : []),
+        ],
+      });
+      creatorName = authorUser?.name || authorUser?.email;
+    }
+
+    const newReport = {
+      lessonId: id,
+      lessonTitle: targetLesson?.title || "Untitled Lesson",
+      creatorId: creatorId ? creatorId.toString() : null,
+      creatorName: creatorName || "Community Creator",
+      reporterUserId: reporterUserId,
+      reporterEmail: reportedUserEmail || "Anonymous",
+      reason: reason,
+      details: details || "",
+      status: "pending",
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+
+    const result = await reportsCollection.insertOne(newReport);
+    return res.status(201).json({
+      success: true,
+      message: "Report submitted successfully.",
+      reportId: result.insertedId,
+    });
+  } catch (error) {
+    console.error("Error submitting report:", error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// UPGRADE PLAN
 app.patch("/api/users/upgrade-plan", verifyToken, async (req, res) => {
   try {
     const { email, userId } = req.body || {};
@@ -1589,6 +1581,7 @@ app.patch("/api/users/upgrade-plan", verifyToken, async (req, res) => {
   }
 });
 
+// Root Health Check
 app.get("/", (req, res) => {
   res.send("Digital Life Lessons API is running!");
 });
